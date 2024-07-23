@@ -1,6 +1,7 @@
 name: Deploy Helm Charts to AKS
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -13,53 +14,64 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v2
 
-      - name: Set up Azure CLI
+      - name: Log in to Azure
         uses: azure/login@v1
         with:
-          creds: >
-            {
-              "clientId": "${{ secrets.AZURE_CLIENT_ID }}",
-              "clientSecret": "${{ secrets.AZURE_CLIENT_SECRET }}",
-              "subscriptionId": "${{ secrets.AZURE_SUBSCRIPTION_ID }}",
-              "tenantId": "${{ secrets.AZURE_TENANT_ID }}"
-            }
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Import Helm charts from reference ACR to instance ACR
+      - name: Import Helm Charts and Deploy to AKS
         run: |
-          # Log in to source ACR
-          az acr login --name ${{ secrets.SOURCE_ACR_SERVER }}
-          # Log in to destination ACR
-          az acr login --name ${{ secrets.INSTANCE_ACR_SERVER }}
+          # Log in to source and destination ACR
+          az acr login --name "${{ secrets.SOURCE_ACR_SERVER }}"
+          az acr login --name "${{ secrets.INSTANCE_ACR_SERVER }}"
 
-          # Pull, tag, and push each chart
+          # Import charts
           for chart in $(echo '${{ secrets.CHARTS }}' | jq -c '.[]'); do
-            chart_name=$(echo $chart | jq -r '.chart_name')
-            chart_version=$(echo $chart | jq -r '.chart_version')
-            chart_repository=$(echo $chart | jq -r '.chart_repository')
+            chart_name=$(echo "$chart" | jq -r '.chart_name')
+            chart_version=$(echo "$chart" | jq -r '.chart_version')
+            chart_repository=$(echo "$chart" | jq -r '.chart_repository')
 
-            helm pull ${{ secrets.SOURCE_ACR_SERVER }}/${chart_repository}/${chart_name} --version ${chart_version}
-            helm chart save ${chart_name}-${chart_version}.tgz ${{ secrets.INSTANCE_ACR_SERVER }}/${chart_repository}/${chart_name}:${chart_version}
-            helm chart push ${{ secrets.INSTANCE_ACR_SERVER }}/${chart_repository}/${chart_name}:${chart_version}
+            helm pull "${{ secrets.SOURCE_ACR_SERVER }}/${chart_repository}/${chart_name}" --version "${chart_version}"
+            helm chart save "${chart_name}-${chart_version}.tgz" "${{ secrets.INSTANCE_ACR_SERVER }}/${chart_repository}/${chart_name}:${chart_version}"
+            helm chart push "${{ secrets.INSTANCE_ACR_SERVER }}/${chart_repository}/${chart_name}:${chart_version}"
           done
 
-      - name: Set up kubectl configuration
-        run: |
-          az aks get-credentials --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} --name ${{ secrets.AZURE_AKS_CLUSTER_NAME }}
+          # Set up kubectl
+          az aks get-credentials --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" --name "${{ secrets.AZURE_AKS_CLUSTER_NAME }}"
 
-      - name: Deploy Helm charts to AKS
-        run: |
+          # Deploy charts
           for chart in $(echo '${{ secrets.CHARTS }}' | jq -c '.[]'); do
-            chart_name=$(echo $chart | jq -r '.chart_name')
-            chart_version=$(echo $chart | jq -r '.chart_version')
-            chart_repository=$(echo $chart | jq -r '.chart_repository')
-            chart_namespace=$(echo $chart | jq -r '.chart_namespace')
-            values=$(echo $chart | jq -r '.values | to_entries | map("\(.key)=\(.value)") | join(",")')
-            sensitive_values=$(echo $chart | jq -r '.sensitive_values | to_entries | map("\(.key)=\(.value)") | join(",")')
+            chart_name=$(echo "$chart" | jq -r '.chart_name')
+            chart_version=$(echo "$chart" | jq -r '.chart_version')
+            chart_repository=$(echo "$chart" | jq -r '.chart_repository')
+            chart_namespace=$(echo "$chart" | jq -r '.chart_namespace')
+            values=$(echo "$chart" | jq -r '.values | to_entries | map("\(.key)=\(.value)") | join(",")')
+            sensitive_values=$(echo "$chart" | jq -r '.sensitive_values | to_entries | map("\(.key)=\(.value)") | join(",")')
 
-            helm upgrade --install ${chart_name} ${secrets.INSTANCE_ACR_SERVER}/${chart_repository}/${chart_name} --version ${chart_version} --namespace ${chart_namespace} --set ${values} --set ${sensitive_values}
+            helm upgrade --install "${chart_name}" "${{ secrets.INSTANCE_ACR_SERVER }}/${chart_repository}/${chart_name}" --version "${chart_version}" --namespace "${chart_namespace}" --set ${values} --set ${sensitive_values}
           done
 
-      - name: Clean up Helm charts
-        run: |
-          rm -rf *.tgz
+          # Clean up Helm charts
+          rm -f *.tgz
 
+      - name: Check Helm Release Status
+        run: |
+          for chart in $(echo '${{ secrets.CHARTS }}' | jq -c '.[]'); do
+            chart_name=$(echo "$chart" | jq -r '.chart_name')
+            chart_namespace=$(echo "$chart" | jq -r '.chart_namespace')
+
+            echo "Checking Helm release status for ${chart_name} in namespace ${chart_namespace}"
+            helm status "${chart_name}" --namespace "${chart_namespace}"
+          done
+
+      - name: Verify Kubernetes Pods and Services
+        run: |
+          for chart in $(echo '${{ secrets.CHARTS }}' | jq -c '.[]'); do
+            chart_namespace=$(echo "$chart" | jq -r '.chart_namespace')
+
+            echo "Verifying Kubernetes pods in namespace ${chart_namespace}"
+            kubectl get pods --namespace "${chart_namespace}"
+
+            echo "Verifying Kubernetes services in namespace ${chart_namespace}"
+            kubectl get services --namespace "${chart_namespace}"
+          done
